@@ -362,6 +362,47 @@
     let autoStopTimerId = null;
     let isLocating = false;
 
+    // ======================
+    // Wake Lock
+    // ======================
+    let wakeLockSentinel = null;
+
+    async function requestWakeLock() {
+      try {
+        if (!("wakeLock" in navigator)) return;
+        if (document.visibilityState !== "visible") return;
+
+        if (wakeLockSentinel) return;
+
+        wakeLockSentinel = await navigator.wakeLock.request("screen");
+
+        wakeLockSentinel.addEventListener("release", () => {
+          wakeLockSentinel = null;
+        });
+      } catch (_err) {
+        // 表示は増やさない
+      }
+    }
+
+    async function releaseWakeLock() {
+      try {
+        if (wakeLockSentinel) {
+          await wakeLockSentinel.release();
+          wakeLockSentinel = null;
+        }
+      } catch (_err) {
+        wakeLockSentinel = null;
+      }
+    }
+
+    async function refreshWakeLock() {
+      await releaseWakeLock();
+      await requestWakeLock();
+    }
+
+    // ======================
+    // UI状態
+    // ======================
     function updateRecordButtonState() {
       if (isRecording) {
         startRecordBtn.classList.add("recording");
@@ -555,11 +596,13 @@
       }
     }
 
-    function startRecording() {
+    async function startRecording() {
       if (isRecording) return;
 
       isRecording = true;
       updateRecordButtonState();
+
+      await refreshWakeLock();
 
       locateOnce({ saveIfRecording: true, recenter: true });
 
@@ -658,8 +701,8 @@
     // ======================
     // ボタン
     // ======================
-    startRecordBtn.addEventListener("click", () => {
-      startRecording();
+    startRecordBtn.addEventListener("click", async () => {
+      await startRecording();
     });
 
     stopRecordBtn.addEventListener("click", () => {
@@ -695,12 +738,14 @@
       updateRecordButtonState();
     }
 
-    map.on("load", () => {
+    map.on("load", async () => {
       setup();
 
       map.on("render", () => {
         redrawOverlay();
       });
+
+      await requestWakeLock();
 
       // 初回のみ一度取得を試す
       locateOnce({ saveIfRecording: false, recenter: true });
@@ -711,13 +756,23 @@
       redrawOverlay();
     });
 
-    window.addEventListener("beforeunload", () => {
-      clearRecordingTimers();
+    document.addEventListener("visibilitychange", async () => {
+      if (document.visibilityState === "visible") {
+        await requestWakeLock();
+      } else {
+        await releaseWakeLock();
+      }
     });
 
-    setTimeout(() => {
+    window.addEventListener("beforeunload", async () => {
+      clearRecordingTimers();
+      await releaseWakeLock();
+    });
+
+    setTimeout(async () => {
       resizeCanvas();
       redrawOverlay();
+      await requestWakeLock();
     }, 300);
   </script>
 </body>
