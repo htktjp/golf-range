@@ -92,7 +92,6 @@
     <canvas id="overlay"></canvas>
 
     <div class="toolbar">
-      <button id="gpsBtn" class="btn" type="button">位置情報を更新</button>
       <button id="startRecordBtn" class="btn secondary" type="button">位置記録開始</button>
       <button id="stopRecordBtn" class="btn secondary" type="button">位置記録終了</button>
       <button id="saveRecordBtn" class="btn secondary" type="button">記録を保存</button>
@@ -107,6 +106,10 @@
     // ======================
     const YARD_TO_M = 0.9144;
     const GPS_UPDATE_INTERVAL_MS = 10000;
+    const AUTO_STOP_MS = 6 * 60 * 60 * 1000; // 6時間
+    const SHOT_CLUSTER_RADIUS_YARD = 2;
+    const SHOT_CLUSTER_RADIUS_M = SHOT_CLUSTER_RADIUS_YARD * YARD_TO_M;
+    const SHOT_CLUSTER_MIN_COUNT = 6;
 
     const RINGS = [
       { yd: 50,  m: 50  * YARD_TO_M, color: "#E53935" },
@@ -122,7 +125,6 @@
     // ======================
     // DOM
     // ======================
-    const gpsBtn = document.getElementById("gpsBtn");
     const startRecordBtn = document.getElementById("startRecordBtn");
     const stopRecordBtn = document.getElementById("stopRecordBtn");
     const saveRecordBtn = document.getElementById("saveRecordBtn");
@@ -258,7 +260,6 @@
 
       ctx.stroke();
 
-      // 点も描く
       for (let i = 0; i < trackPoints.length; i++) {
         const p = map.project([trackPoints[i].lng, trackPoints[i].lat]);
         ctx.beginPath();
@@ -269,6 +270,32 @@
         ctx.strokeStyle = "rgba(0,0,0,0.8)";
         ctx.stroke();
       }
+
+      ctx.restore();
+    }
+
+    function drawShotMarkers() {
+      if (!shotMarkers.length) return;
+
+      ctx.save();
+
+      for (const marker of shotMarkers) {
+        const p = map.project([marker.lng, marker.lat]);
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 10, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(30, 136, 229, 0.92)";
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "rgba(255,255,255,0.95)";
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(255,255,255,0.95)";
+        ctx.fill();
+      }
+
       ctx.restore();
     }
 
@@ -305,15 +332,34 @@
       }
 
       drawTrackLine();
+      drawShotMarkers();
       drawCenterDot(cx, cy);
+    }
+
+    // ======================
+    // 距離計算
+    // ======================
+    function distanceMeters(lat1, lng1, lat2, lng2) {
+      const R = 6378137;
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLng = (lng2 - lng1) * Math.PI / 180;
+      const a =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1 * Math.PI / 180) *
+        Math.cos(lat2 * Math.PI / 180) *
+        Math.sin(dLng / 2) * Math.sin(dLng / 2);
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      return R * c;
     }
 
     // ======================
     // 記録データ
     // ======================
     let trackPoints = [];
+    let shotMarkers = [];
     let isRecording = false;
     let gpsTimerId = null;
+    let autoStopTimerId = null;
     let isLocating = false;
 
     function updateRecordButtonState() {
@@ -342,21 +388,72 @@
     function buildRecordJson() {
       return {
         type: "golf-track",
-        version: 1,
+        version: 2,
         createdAt: new Date().toISOString(),
         points: trackPoints.map(p => ({
           lat: p.lat,
           lng: p.lng,
           accuracy: p.accuracy ?? null,
           timestamp: p.timestamp
+        })),
+        shotMarkers: shotMarkers.map(m => ({
+          lat: m.lat,
+          lng: m.lng,
+          count: m.count,
+          sourcePointIndices: Array.isArray(m.sourcePointIndices) ? m.sourcePointIndices : []
         }))
       };
+    }
+
+    function recomputeShotMarkers() {
+      const markers = [];
+
+      for (let i = 0; i < trackPoints.length; i++) {
+        const base = trackPoints[i];
+        const clusterIndices = [i];
+
+        for (let j = 0; j < trackPoints.length; j++) {
+          if (i === j) continue;
+          const d = distanceMeters(base.lat, base.lng, trackPoints[j].lat, trackPoints[j].lng);
+          if (d <= SHOT_CLUSTER_RADIUS_M) {
+            clusterIndices.push(j);
+          }
+        }
+
+        const uniqueIndices = Array.from(new Set(clusterIndices)).sort((a, b) => a - b);
+
+        if (uniqueIndices.length >= SHOT_CLUSTER_MIN_COUNT) {
+          let sumLat = 0;
+          let sumLng = 0;
+          for (const idx of uniqueIndices) {
+            sumLat += trackPoints[idx].lat;
+            sumLng += trackPoints[idx].lng;
+          }
+
+          const avgLat = sumLat / uniqueIndices.length;
+          const avgLng = sumLng / uniqueIndices.length;
+
+          const alreadyExists = markers.some(m =>
+            distanceMeters(avgLat, avgLng, m.lat, m.lng) <= SHOT_CLUSTER_RADIUS_M
+          );
+
+          if (!alreadyExists) {
+            markers.push({
+              lat: avgLat,
+              lng: avgLng,
+              count: uniqueIndices.length,
+              sourcePointIndices: uniqueIndices
+            });
+          }
+        }
+      }
+
+      shotMarkers = markers;
     }
 
     function addTrackPoint(lat, lng, accuracy = null) {
       const last = trackPoints.length ? trackPoints[trackPoints.length - 1] : null;
 
-      // 完全同一なら追加しない
       if (last && last.lat === lat && last.lng === lng) {
         return;
       }
@@ -368,27 +465,34 @@
         timestamp: new Date().toISOString()
       });
 
+      recomputeShotMarkers();
       redrawOverlay();
     }
 
     function fitTrackToView() {
-      if (!trackPoints.length) return;
-      if (trackPoints.length === 1) {
+      const allPoints = [];
+
+      for (const p of trackPoints) {
+        allPoints.push([p.lng, p.lat]);
+      }
+      for (const m of shotMarkers) {
+        allPoints.push([m.lng, m.lat]);
+      }
+
+      if (!allPoints.length) return;
+
+      if (allPoints.length === 1) {
         map.easeTo({
-          center: [trackPoints[0].lng, trackPoints[0].lat],
+          center: allPoints[0],
           zoom: Math.max(map.getZoom(), 18),
           duration: 500
         });
         return;
       }
 
-      const bounds = new maplibregl.LngLatBounds(
-        [trackPoints[0].lng, trackPoints[0].lat],
-        [trackPoints[0].lng, trackPoints[0].lat]
-      );
-
-      for (const p of trackPoints) {
-        bounds.extend([p.lng, p.lat]);
+      const bounds = new maplibregl.LngLatBounds(allPoints[0], allPoints[0]);
+      for (const pt of allPoints) {
+        bounds.extend(pt);
       }
 
       map.fitBounds(bounds, {
@@ -401,16 +505,11 @@
     // ======================
     // GPS
     // ======================
-    function setGpsButtonText(text) {
-      gpsBtn.textContent = text;
-    }
-
     function locateOnce(options = { saveIfRecording: false, recenter: true }) {
       if (!("geolocation" in navigator)) return;
       if (isLocating) return;
 
       isLocating = true;
-      setGpsButtonText("取得中…");
 
       navigator.geolocation.getCurrentPosition(
         (pos) => {
@@ -431,12 +530,10 @@
           }
 
           isLocating = false;
-          setGpsButtonText("位置情報を更新");
           redrawOverlay();
         },
         (_err) => {
           isLocating = false;
-          setGpsButtonText("位置情報を更新");
           redrawOverlay();
         },
         {
@@ -447,29 +544,38 @@
       );
     }
 
+    function clearRecordingTimers() {
+      if (gpsTimerId !== null) {
+        window.clearInterval(gpsTimerId);
+        gpsTimerId = null;
+      }
+      if (autoStopTimerId !== null) {
+        window.clearTimeout(autoStopTimerId);
+        autoStopTimerId = null;
+      }
+    }
+
     function startRecording() {
       if (isRecording) return;
 
       isRecording = true;
       updateRecordButtonState();
 
-      // 開始時に1回すぐ取得
       locateOnce({ saveIfRecording: true, recenter: true });
 
-      // 10秒ごと更新
       gpsTimerId = window.setInterval(() => {
         locateOnce({ saveIfRecording: true, recenter: true });
       }, GPS_UPDATE_INTERVAL_MS);
+
+      autoStopTimerId = window.setTimeout(() => {
+        stopRecording();
+      }, AUTO_STOP_MS);
     }
 
     function stopRecording() {
       isRecording = false;
       updateRecordButtonState();
-
-      if (gpsTimerId !== null) {
-        window.clearInterval(gpsTimerId);
-        gpsTimerId = null;
-      }
+      clearRecordingTimers();
     }
 
     // ======================
@@ -504,16 +610,12 @@
             throw new Error("JSON形式が不正です。");
           }
 
-          const loaded = [];
+          const loadedPoints = [];
           for (const p of json.points) {
-            if (
-              typeof p.lat !== "number" ||
-              typeof p.lng !== "number"
-            ) {
+            if (typeof p.lat !== "number" || typeof p.lng !== "number") {
               continue;
             }
-
-            loaded.push({
+            loadedPoints.push({
               lat: p.lat,
               lng: p.lng,
               accuracy: typeof p.accuracy === "number" ? p.accuracy : null,
@@ -521,7 +623,27 @@
             });
           }
 
-          trackPoints = loaded;
+          trackPoints = loadedPoints;
+
+          const loadedMarkers = [];
+          if (Array.isArray(json.shotMarkers)) {
+            for (const m of json.shotMarkers) {
+              if (typeof m.lat !== "number" || typeof m.lng !== "number") continue;
+              loadedMarkers.push({
+                lat: m.lat,
+                lng: m.lng,
+                count: typeof m.count === "number" ? m.count : 0,
+                sourcePointIndices: Array.isArray(m.sourcePointIndices) ? m.sourcePointIndices : []
+              });
+            }
+          }
+
+          shotMarkers = loadedMarkers;
+
+          if (!shotMarkers.length && trackPoints.length) {
+            recomputeShotMarkers();
+          }
+
           redrawOverlay();
           fitTrackToView();
         } catch (err) {
@@ -536,10 +658,6 @@
     // ======================
     // ボタン
     // ======================
-    gpsBtn.addEventListener("click", () => {
-      locateOnce({ saveIfRecording: false, recenter: true });
-    });
-
     startRecordBtn.addEventListener("click", () => {
       startRecording();
     });
@@ -564,6 +682,7 @@
     fileInput.addEventListener("change", (e) => {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
+      stopRecording();
       loadTrackJsonFromFile(file);
     });
 
@@ -590,6 +709,10 @@
     window.addEventListener("resize", () => {
       resizeCanvas();
       redrawOverlay();
+    });
+
+    window.addEventListener("beforeunload", () => {
+      clearRecordingTimers();
     });
 
     setTimeout(() => {
