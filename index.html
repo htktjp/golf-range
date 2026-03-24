@@ -133,8 +133,8 @@
     </div>
 
     <div id="bottomStatus" class="bottomStatus">
-      <div class="warning">記録中はアプリを閉じないで下さい</div>
-      <div id="distanceText" class="distance">0yd（0m）</div>
+      <div id="warningText" class="warning">記録中はアプリを閉じないで下さい</div>
+      <div id="distanceText" class="distance">トータル移動距離：0yd（0m）※目安です</div>
     </div>
   </div>
 
@@ -169,6 +169,7 @@
     const loadRecordBtn = document.getElementById("loadRecordBtn");
     const fileInput = document.getElementById("fileInput");
     const bottomStatus = document.getElementById("bottomStatus");
+    const warningText = document.getElementById("warningText");
     const distanceText = document.getElementById("distanceText");
 
     // ======================
@@ -407,15 +408,32 @@
       return total;
     }
 
+    function formatTotalDistanceText() {
+      const totalM = Math.round(totalTrackDistanceMeters());
+      const totalYd = Math.round(totalM / YARD_TO_M);
+      return `トータル移動距離：${totalYd}yd（${totalM}m）※目安です`;
+    }
+
     function updateBottomStatus() {
+      const hasTrack = trackPoints.length > 0;
+
       if (isRecording) {
         bottomStatus.classList.add("show");
-        const totalM = Math.round(totalTrackDistanceMeters());
-        const totalYd = Math.round(totalM / YARD_TO_M);
-        distanceText.textContent = `${totalYd}yd（${totalM}m）`;
-      } else {
-        bottomStatus.classList.remove("show");
+        warningText.style.display = "block";
+        distanceText.textContent = formatTotalDistanceText();
+        return;
       }
+
+      if (hasTrack) {
+        bottomStatus.classList.add("show");
+        warningText.style.display = "none";
+        distanceText.textContent = formatTotalDistanceText();
+        return;
+      }
+
+      bottomStatus.classList.remove("show");
+      warningText.style.display = "none";
+      distanceText.textContent = "トータル移動距離：0yd（0m）※目安です";
     }
 
     // ======================
