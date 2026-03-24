@@ -148,6 +148,8 @@
     const SHOT_CLUSTER_RADIUS_YARD = 2;
     const SHOT_CLUSTER_RADIUS_M = SHOT_CLUSTER_RADIUS_YARD * YARD_TO_M;
     const SHOT_CLUSTER_MIN_COUNT = 6;
+    const MIN_DISTANCE_FOR_TOTAL_M = 5; // 5m未満はトータル距離に加算しない
+    const MIN_DISTANCE_FOR_TRACK_POINT_M = 5; // 5m未満は同じ場所とみなして記録点に追加しない
 
     const RINGS = [
       { yd: 50,  m: 50  * YARD_TO_M, color: "#E53935" },
@@ -398,12 +400,15 @@
 
       let total = 0;
       for (let i = 1; i < trackPoints.length; i++) {
-        total += distanceMeters(
+        const seg = distanceMeters(
           trackPoints[i - 1].lat,
           trackPoints[i - 1].lng,
           trackPoints[i].lat,
           trackPoints[i].lng
         );
+        if (seg >= MIN_DISTANCE_FOR_TOTAL_M) {
+          total += seg;
+        }
       }
       return total;
     }
@@ -512,7 +517,7 @@
     function buildRecordJson() {
       return {
         type: "golf-track",
-        version: 2,
+        version: 3,
         createdAt: new Date().toISOString(),
         points: trackPoints.map(p => ({
           lat: p.lat,
@@ -578,8 +583,13 @@
     function addTrackPoint(lat, lng, accuracy = null) {
       const last = trackPoints.length ? trackPoints[trackPoints.length - 1] : null;
 
-      if (last && last.lat === lat && last.lng === lng) {
-        return;
+      if (last) {
+        const moveDist = distanceMeters(last.lat, last.lng, lat, lng);
+
+        // 5m未満は同じ場所とみなして記録点を追加しない
+        if (moveDist < MIN_DISTANCE_FOR_TRACK_POINT_M) {
+          return;
+        }
       }
 
       trackPoints.push({
