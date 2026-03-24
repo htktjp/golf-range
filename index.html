@@ -148,8 +148,8 @@
     const SHOT_CLUSTER_RADIUS_YARD = 2;
     const SHOT_CLUSTER_RADIUS_M = SHOT_CLUSTER_RADIUS_YARD * YARD_TO_M;
     const SHOT_CLUSTER_MIN_COUNT = 6;
-    const MIN_DISTANCE_FOR_TOTAL_M = 5; // 5m未満はトータル距離に加算しない
-    const MIN_DISTANCE_FOR_TRACK_POINT_M = 5; // 5m未満は同じ場所とみなして記録点に追加しない
+    const MIN_DISTANCE_FOR_TOTAL_M = 10; // 10m未満はトータル距離に加算しない
+    const MIN_DISTANCE_FOR_TRACK_POINT_M = 10; // 10m未満は同じ場所とみなして記録点に追加しない
 
     const RINGS = [
       { yd: 50,  m: 50  * YARD_TO_M, color: "#E53935" },
@@ -586,7 +586,7 @@
       if (last) {
         const moveDist = distanceMeters(last.lat, last.lng, lat, lng);
 
-        // 5m未満は同じ場所とみなして記録点を追加しない
+        // 10m未満は同じ場所とみなして記録点を追加しない
         if (moveDist < MIN_DISTANCE_FOR_TRACK_POINT_M) {
           return;
         }
