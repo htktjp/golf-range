@@ -79,6 +79,39 @@
       display: none;
     }
 
+    .bottomStatus {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      z-index: 20;
+      display: none;
+      background: rgba(255,255,255,0.92);
+      border-radius: 14px;
+      padding: 10px 14px;
+      box-shadow: 0 8px 22px rgba(0,0,0,0.18);
+      backdrop-filter: blur(6px);
+    }
+
+    .bottomStatus.show {
+      display: block;
+    }
+
+    .bottomStatus .warning {
+      color: #d32f2f;
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.35;
+    }
+
+    .bottomStatus .distance {
+      color: #111;
+      font-size: 15px;
+      font-weight: 800;
+      line-height: 1.4;
+      margin-top: 4px;
+    }
+
     .maplibregl-ctrl,
     .maplibregl-ctrl-bottom-left,
     .maplibregl-ctrl-bottom-right {
@@ -97,6 +130,11 @@
       <button id="saveRecordBtn" class="btn secondary" type="button">記録を保存</button>
       <button id="loadRecordBtn" class="btn secondary" type="button">記録を呼び出し</button>
       <input id="fileInput" type="file" accept=".json,application/json" />
+    </div>
+
+    <div id="bottomStatus" class="bottomStatus">
+      <div class="warning">記録中はアプリを閉じないで下さい</div>
+      <div id="distanceText" class="distance">0yd（0m）</div>
     </div>
   </div>
 
@@ -130,6 +168,8 @@
     const saveRecordBtn = document.getElementById("saveRecordBtn");
     const loadRecordBtn = document.getElementById("loadRecordBtn");
     const fileInput = document.getElementById("fileInput");
+    const bottomStatus = document.getElementById("bottomStatus");
+    const distanceText = document.getElementById("distanceText");
 
     // ======================
     // 地図
@@ -352,6 +392,32 @@
       return R * c;
     }
 
+    function totalTrackDistanceMeters() {
+      if (trackPoints.length < 2) return 0;
+
+      let total = 0;
+      for (let i = 1; i < trackPoints.length; i++) {
+        total += distanceMeters(
+          trackPoints[i - 1].lat,
+          trackPoints[i - 1].lng,
+          trackPoints[i].lat,
+          trackPoints[i].lng
+        );
+      }
+      return total;
+    }
+
+    function updateBottomStatus() {
+      if (isRecording) {
+        bottomStatus.classList.add("show");
+        const totalM = Math.round(totalTrackDistanceMeters());
+        const totalYd = Math.round(totalM / YARD_TO_M);
+        distanceText.textContent = `${totalYd}yd（${totalM}m）`;
+      } else {
+        bottomStatus.classList.remove("show");
+      }
+    }
+
     // ======================
     // 記録データ
     // ======================
@@ -371,7 +437,6 @@
       try {
         if (!("wakeLock" in navigator)) return;
         if (document.visibilityState !== "visible") return;
-
         if (wakeLockSentinel) return;
 
         wakeLockSentinel = await navigator.wakeLock.request("screen");
@@ -380,7 +445,6 @@
           wakeLockSentinel = null;
         });
       } catch (_err) {
-        // 表示は増やさない
       }
     }
 
@@ -411,6 +475,7 @@
         startRecordBtn.classList.remove("recording");
         startRecordBtn.textContent = "位置記録開始";
       }
+      updateBottomStatus();
     }
 
     function getTimestampString() {
@@ -507,6 +572,7 @@
       });
 
       recomputeShotMarkers();
+      updateBottomStatus();
       redrawOverlay();
     }
 
@@ -537,7 +603,7 @@
       }
 
       map.fitBounds(bounds, {
-        padding: { top: 80, right: 40, bottom: 40, left: 40 },
+        padding: { top: 80, right: 40, bottom: 100, left: 40 },
         duration: 700,
         maxZoom: 19
       });
@@ -687,6 +753,7 @@
             recomputeShotMarkers();
           }
 
+          updateBottomStatus();
           redrawOverlay();
           fitTrackToView();
         } catch (err) {
@@ -747,7 +814,6 @@
 
       await requestWakeLock();
 
-      // 初回のみ一度取得を試す
       locateOnce({ saveIfRecording: false, recenter: true });
     });
 
