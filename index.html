@@ -143,13 +143,15 @@
     // 設定
     // ======================
     const YARD_TO_M = 0.9144;
-    const GPS_UPDATE_INTERVAL_MS = 10000;
-    const AUTO_STOP_MS = 6 * 60 * 60 * 1000; // 6時間
-    const SHOT_CLUSTER_RADIUS_YARD = 2;
-    const SHOT_CLUSTER_RADIUS_M = SHOT_CLUSTER_RADIUS_YARD * YARD_TO_M;
-    const SHOT_CLUSTER_MIN_COUNT = 6;
-    const MIN_DISTANCE_FOR_TOTAL_M = 10; // 10m未満はトータル距離に加算しない
-    const MIN_DISTANCE_FOR_TRACK_POINT_M = 10; // 10m未満は同じ場所とみなして記録点に追加しない
+    const GPS_UPDATE_INTERVAL_MS = 5000;          // 5秒
+    const AUTO_STOP_MS = 6 * 60 * 60 * 1000;     // 6時間
+    const MIN_DISTANCE_FOR_TOTAL_M = 8;          // 8m未満はトータル距離に加算しない
+    const MIN_DISTANCE_FOR_TRACK_POINT_M = 8;    // 8m未満は同じ場所とみなして線を引かない
+
+    // 同位置判定
+    const SAME_LOCATION_RADIUS_M = 8;            // 8m以内を同位置とみなす
+    const SAME_LOCATION_SECONDS_FOR_SHOT = 60;   // 60秒
+    const SAME_LOCATION_MIN_COUNT = Math.ceil(SAME_LOCATION_SECONDS_FOR_SHOT * 1000 / GPS_UPDATE_INTERVAL_MS); // 12回
 
     const RINGS = [
       { yd: 50,  m: 50  * YARD_TO_M, color: "#E53935" },
@@ -291,13 +293,10 @@
 
       for (let i = 0; i < trackPoints.length; i++) {
         const p = map.project([trackPoints[i].lng, trackPoints[i].lat]);
-        const x = p.x;
-        const y = p.y;
-
         if (i === 0) {
-          ctx.moveTo(x, y);
+          ctx.moveTo(p.x, p.y);
         } else {
-          ctx.lineTo(x, y);
+          ctx.lineTo(p.x, p.y);
         }
       }
 
@@ -451,6 +450,9 @@
     let autoStopTimerId = null;
     let isLocating = false;
 
+    // 同位置滞在判定用
+    let stationaryCluster = null;
+
     // ======================
     // Wake Lock
     // ======================
@@ -517,7 +519,7 @@
     function buildRecordJson() {
       return {
         type: "golf-track",
-        version: 3,
+        version: 4,
         createdAt: new Date().toISOString(),
         points: trackPoints.map(p => ({
           lat: p.lat,
@@ -529,65 +531,120 @@
           lat: m.lat,
           lng: m.lng,
           count: m.count,
-          sourcePointIndices: Array.isArray(m.sourcePointIndices) ? m.sourcePointIndices : []
+          source: m.source || "stationary",
+          timestamp: m.timestamp || null
         }))
       };
     }
 
-    function recomputeShotMarkers() {
-      const markers = [];
+    function shotMarkerExistsNear(lat, lng, radiusM = SAME_LOCATION_RADIUS_M) {
+      return shotMarkers.some(m => distanceMeters(lat, lng, m.lat, m.lng) < radiusM);
+    }
+
+    function addShotMarker(lat, lng, count, timestamp = null) {
+      if (shotMarkerExistsNear(lat, lng)) return;
+
+      shotMarkers.push({
+        lat,
+        lng,
+        count,
+        source: "stationary",
+        timestamp
+      });
+    }
+
+    function recomputeShotMarkersFromLoadedTrack() {
+      // 読み込み時にマーカーが無い旧データ向け
+      shotMarkers = [];
+
+      if (!trackPoints.length) return;
+
+      let cluster = null;
 
       for (let i = 0; i < trackPoints.length; i++) {
-        const base = trackPoints[i];
-        const clusterIndices = [i];
+        const p = trackPoints[i];
 
-        for (let j = 0; j < trackPoints.length; j++) {
-          if (i === j) continue;
-          const d = distanceMeters(base.lat, base.lng, trackPoints[j].lat, trackPoints[j].lng);
-          if (d <= SHOT_CLUSTER_RADIUS_M) {
-            clusterIndices.push(j);
-          }
+        if (!cluster) {
+          cluster = {
+            lat: p.lat,
+            lng: p.lng,
+            count: 1,
+            firstTimestamp: p.timestamp || null,
+            lastTimestamp: p.timestamp || null
+          };
+          continue;
         }
 
-        const uniqueIndices = Array.from(new Set(clusterIndices)).sort((a, b) => a - b);
+        const d = distanceMeters(cluster.lat, cluster.lng, p.lat, p.lng);
 
-        if (uniqueIndices.length >= SHOT_CLUSTER_MIN_COUNT) {
-          let sumLat = 0;
-          let sumLng = 0;
-          for (const idx of uniqueIndices) {
-            sumLat += trackPoints[idx].lat;
-            sumLng += trackPoints[idx].lng;
+        if (d < SAME_LOCATION_RADIUS_M) {
+          cluster.lat = (cluster.lat * cluster.count + p.lat) / (cluster.count + 1);
+          cluster.lng = (cluster.lng * cluster.count + p.lng) / (cluster.count + 1);
+          cluster.count += 1;
+          cluster.lastTimestamp = p.timestamp || cluster.lastTimestamp;
+
+          if (cluster.count >= SAME_LOCATION_MIN_COUNT) {
+            addShotMarker(cluster.lat, cluster.lng, cluster.count, cluster.lastTimestamp);
           }
-
-          const avgLat = sumLat / uniqueIndices.length;
-          const avgLng = sumLng / uniqueIndices.length;
-
-          const alreadyExists = markers.some(m =>
-            distanceMeters(avgLat, avgLng, m.lat, m.lng) <= SHOT_CLUSTER_RADIUS_M
-          );
-
-          if (!alreadyExists) {
-            markers.push({
-              lat: avgLat,
-              lng: avgLng,
-              count: uniqueIndices.length,
-              sourcePointIndices: uniqueIndices
-            });
-          }
+        } else {
+          cluster = {
+            lat: p.lat,
+            lng: p.lng,
+            count: 1,
+            firstTimestamp: p.timestamp || null,
+            lastTimestamp: p.timestamp || null
+          };
         }
       }
-
-      shotMarkers = markers;
     }
 
     function addTrackPoint(lat, lng, accuracy = null) {
+      const timestamp = new Date().toISOString();
       const last = trackPoints.length ? trackPoints[trackPoints.length - 1] : null;
 
+      // 同位置滞在判定は「生の更新」ベースで行う
+      if (!stationaryCluster) {
+        stationaryCluster = {
+          lat,
+          lng,
+          count: 1,
+          firstTimestamp: timestamp,
+          lastTimestamp: timestamp
+        };
+      } else {
+        const stationaryDist = distanceMeters(stationaryCluster.lat, stationaryCluster.lng, lat, lng);
+
+        if (stationaryDist < SAME_LOCATION_RADIUS_M) {
+          stationaryCluster.lat = (stationaryCluster.lat * stationaryCluster.count + lat) / (stationaryCluster.count + 1);
+          stationaryCluster.lng = (stationaryCluster.lng * stationaryCluster.count + lng) / (stationaryCluster.count + 1);
+          stationaryCluster.count += 1;
+          stationaryCluster.lastTimestamp = timestamp;
+
+          if (stationaryCluster.count >= SAME_LOCATION_MIN_COUNT) {
+            addShotMarker(
+              stationaryCluster.lat,
+              stationaryCluster.lng,
+              stationaryCluster.count,
+              stationaryCluster.lastTimestamp
+            );
+          }
+        } else {
+          stationaryCluster = {
+            lat,
+            lng,
+            count: 1,
+            firstTimestamp: timestamp,
+            lastTimestamp: timestamp
+          };
+        }
+      }
+
+      // 線記録は8m未満なら追加しない
       if (last) {
         const moveDist = distanceMeters(last.lat, last.lng, lat, lng);
-
-        // 10m未満は同じ場所とみなして記録点を追加しない
         if (moveDist < MIN_DISTANCE_FOR_TRACK_POINT_M) {
+          updateBottomStatus();
+          redrawOverlay();
           return;
         }
       }
@@ -596,10 +653,9 @@
         lat,
         lng,
         accuracy,
-        timestamp: new Date().toISOString()
+        timestamp
       });
 
-      recomputeShotMarkers();
       updateBottomStatus();
       redrawOverlay();
     }
@@ -749,9 +805,7 @@
 
           const loadedPoints = [];
           for (const p of json.points) {
-            if (typeof p.lat !== "number" || typeof p.lng !== "number") {
-              continue;
-            }
+            if (typeof p.lat !== "number" || typeof p.lng !== "number") continue;
             loadedPoints.push({
               lat: p.lat,
               lng: p.lng,
@@ -761,6 +815,7 @@
           }
 
           trackPoints = loadedPoints;
+          stationaryCluster = null;
 
           const loadedMarkers = [];
           if (Array.isArray(json.shotMarkers)) {
@@ -770,7 +825,8 @@
                 lat: m.lat,
                 lng: m.lng,
                 count: typeof m.count === "number" ? m.count : 0,
-                sourcePointIndices: Array.isArray(m.sourcePointIndices) ? m.sourcePointIndices : []
+                source: typeof m.source === "string" ? m.source : "stationary",
+                timestamp: typeof m.timestamp === "string" ? m.timestamp : null
               });
             }
           }
@@ -778,7 +834,7 @@
           shotMarkers = loadedMarkers;
 
           if (!shotMarkers.length && trackPoints.length) {
-            recomputeShotMarkers();
+            recomputeShotMarkersFromLoadedTrack();
           }
 
           updateBottomStatus();
@@ -805,7 +861,7 @@
     });
 
     saveRecordBtn.addEventListener("click", () => {
-      if (!trackPoints.length) {
+      if (!trackPoints.length && !shotMarkers.length) {
         alert("保存する記録がありません。");
         return;
       }
@@ -841,7 +897,6 @@
       });
 
       await requestWakeLock();
-
       locateOnce({ saveIfRecording: false, recenter: true });
     });
 
